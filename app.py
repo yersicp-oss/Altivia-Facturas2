@@ -11,6 +11,8 @@ from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaIoBaseUpload
 from google.auth.transport.requests import Request
+from google.auth.exceptions import RefreshError
+from googleapiclient.errors import HttpError
 
 import pandas as pd
 import streamlit as st
@@ -163,13 +165,42 @@ def money(v):
     return n
 
 
+class DriveBackupError(Exception):
+    """Safe-to-display diagnostics. Never include credential or raw API payload."""
+
+
+def drive_error(phase, exc):
+    if isinstance(exc, RefreshError):
+        raise DriveBackupError(
+            f"{phase}: no fue posible renovar la autorización OAuth. "
+            "Verifica que CLIENT_ID, CLIENT_SECRET y REFRESH_TOKEN sean del mismo cliente, "
+            "y que el token siga vigente."
+        ) from exc
+    if isinstance(exc, HttpError):
+        status = exc.resp.status
+        if status == 403:
+            hint = "Sin permiso API para la carpeta o alcance OAuth insuficiente."
+        elif status == 404:
+            hint = "La cuenta OAuth no puede ver la carpeta indicada (o su ID no existe)."
+        elif status == 401:
+            hint = "La autorización de Google no es válida."
+        elif status == 429:
+            hint = "Google Drive está limitando temporalmente las solicitudes."
+        else:
+            hint = "Revisa los permisos, la cuota y la configuración de Google Drive."
+        raise DriveBackupError(f"{phase}: Google Drive respondió HTTP {status}. {hint}") from exc
+    raise DriveBackupError(f"{phase}: fallo de conexión o configuración ({type(exc).__name__}).") from exc
+
+
 def drive_client():
-    """OAuth offline-user credentials. Never expose these secrets to browser/GitHub."""
+    """Utiliza OAuth de usuario: el navegador y la API pueden tener accesos distintos."""
     settings = st.secrets
-    required = ["GOOGLE_CLIENT_ID", "GOOGLE_CLIENT_SECRET", "GOOGLE_REFRESH_TOKEN"]
+    required = ("GOOGLE_CLIENT_ID", "GOOGLE_CLIENT_SECRET", "GOOGLE_REFRESH_TOKEN")
     missing = [key for key in required if not settings.get(key)]
     if missing:
-        raise ValueError("Google Drive no está configurado: falta " + ", ".join(missing))
+        raise DriveBackupError("Faltan secretos en Streamlit: " + ", ".join(missing))
+    # Este scope exige que el refresh token se haya autorizado con Drive completo.
+    # No se puede ampliar el permiso de un refresh token ya emitido.
     creds = Credentials(
         token=None,
         refresh_token=settings["GOOGLE_REFRESH_TOKEN"],
@@ -178,52 +209,88 @@ def drive_client():
         client_secret=settings["GOOGLE_CLIENT_SECRET"],
         scopes=["https://www.googleapis.com/auth/drive"],
     )
-    creds.refresh(Request())
-    return build("drive", "v3", credentials=creds, cache_discovery=False)
+    try:
+        creds.refresh(Request())
+    except Exception as exc:
+        drive_error("Renovación OAuth", exc)
+    try:
+        return build("drive", "v3", credentials=creds, cache_discovery=False)
+    except Exception as exc:
+        drive_error("Conexión API", exc)
+
+
+def drive_root_id():
+    return str(st.secrets.get("GOOGLE_DRIVE_FOLDER_ID", DRIVE_ROOT_ID)).strip()
+
+
+def drive_check_root(service):
+    """Comprueba acceso de la cuenta OAuth, no del navegador abierto."""
+    try:
+        folder = service.files().get(
+            fileId=drive_root_id(),
+            fields="id,name,mimeType,capabilities(canAddChildren)",
+            supportsAllDrives=True,
+        ).execute()
+    except Exception as exc:
+        drive_error("Acceso a carpeta raíz", exc)
+    if folder.get("mimeType") != "application/vnd.google-apps.folder":
+        raise DriveBackupError("La carpeta configurada no es una carpeta de Google Drive.")
+    if folder.get("capabilities", {}).get("canAddChildren") is False:
+        raise DriveBackupError("La cuenta OAuth puede ver la carpeta pero no crear archivos dentro.")
+    return folder
 
 
 def drive_folder(service, name, parent):
-    """Find/create month or date folder beneath a known parent."""
     escaped = name.replace("\\", "\\\\").replace("'", "\\'")
-    q = f"name = '{escaped}' and mimeType = 'application/vnd.google-apps.folder' and '{parent}' in parents and trashed = false"
-    result = service.files().list(q=q, fields="files(id,name),nextPageToken", page_size=50).execute()
-    if result.get("files"):
-        return result["files"][0]["id"]
-    created = service.files().create(
-        body={"name": name, "mimeType": "application/vnd.google-apps.folder", "parents": [parent]},
-        fields="id",
-    ).execute()
-    return created["id"]
+    q = (f"name = '{escaped}' and mimeType = "
+         f"'application/vnd.google-apps.folder' and '{parent}' in parents and trashed = false")
+    try:
+        result = service.files().list(
+            q=q, fields="nextPageToken,files(id,name)", pageSize=100,
+            supportsAllDrives=True, includeItemsFromAllDrives=True,
+        ).execute()
+        if result.get("files"):
+            return result["files"][0]["id"]
+        created = service.files().create(
+            body={"name": name, "mimeType": "application/vnd.google-apps.folder", "parents": [parent]},
+            fields="id", supportsAllDrives=True,
+        ).execute()
+        return created["id"]
+    except Exception as exc:
+        drive_error("Crear/buscar carpeta " + name, exc)
 
 
 def drive_upload(file_bytes, original_name, invoice_values):
-    """Save immutable original under FACTURAS / YYYY-MM / DD-MM-YYYY."""
+    """Respalda el original en FACTURAS / AAAA-MM / DD-MM-AAAA."""
     service = drive_client()
+    drive_check_root(service)
     issued = date.fromisoformat(invoice_values["fecha"])
-    month = drive_folder(service, issued.strftime("%Y-%m"), DRIVE_ROOT_ID)
+    month = drive_folder(service, issued.strftime("%Y-%m"), drive_root_id())
     day = drive_folder(service, issued.strftime("%d-%m-%Y"), month)
     ext = Path(original_name).suffix.lower()
     if ext not in (".jpg", ".jpeg", ".png", ".webp", ".pdf"):
         raise ValueError("Extensión de archivo no admitida")
-    serie = invoice_values["serie"].upper()
-    numero = invoice_values["numero"].upper()
-    ruc = invoice_values["ruc"]
-    name = f"{serie}-{numero}-{ruc}{ext}"
+    name = f'{invoice_values["serie"].upper()}-{invoice_values["numero"].upper()}-{invoice_values["ruc"]}{ext}'
     mime = {".jpg":"image/jpeg", ".jpeg":"image/jpeg", ".png":"image/png", ".webp":"image/webp", ".pdf":"application/pdf"}[ext]
-    # In case a previous upload succeeded but the database request failed, avoid duplicates.
     escaped = name.replace("\\", "\\\\").replace("'", "\\'")
     q = f"name = '{escaped}' and '{day}' in parents and trashed = false"
-    existing = service.files().list(q=q, fields="files(id,webViewLink),nextPageToken", page_size=10).execute().get("files", [])
-    if existing:
-        fid = existing[0]["id"]
-        return fid, existing[0].get("webViewLink") or f"https://drive.google.com/file/d/{fid}/view"
-    media = MediaIoBaseUpload(io.BytesIO(file_bytes), mimetype=mime, resumable=False)
-    created = service.files().create(
-        body={"name":name,"parents":[day],"description":"ALTIVIA - comprobante original"},
-        media_body=media, fields="id,webViewLink",
-    ).execute()
-    fid = created["id"]
-    return fid, created.get("webViewLink") or f"https://drive.google.com/file/d/{fid}/view"
+    try:
+        existing = service.files().list(
+            q=q, fields="nextPageToken,files(id,webViewLink)", pageSize=10,
+            supportsAllDrives=True, includeItemsFromAllDrives=True,
+        ).execute().get("files", [])
+        if existing:
+            fid = existing[0]["id"]
+            return fid, existing[0].get("webViewLink") or f"https://drive.google.com/file/d/{fid}/view"
+        media = MediaIoBaseUpload(io.BytesIO(file_bytes), mimetype=mime, resumable=False)
+        created = service.files().create(
+            body={"name":name,"parents":[day],"description":"ALTIVIA - comprobante original"},
+            media_body=media, fields="id,webViewLink", supportsAllDrives=True,
+        ).execute()
+        fid = created["id"]
+        return fid, created.get("webViewLink") or f"https://drive.google.com/file/d/{fid}/view"
+    except Exception as exc:
+        drive_error("Subir archivo", exc)
 
 
 def register(member_id, vals, original_bytes, original_name):
@@ -304,6 +371,14 @@ def private_access():
         members = list_members()
         if members:
             st.caption("Miembros activos: " + ", ".join(m["name"] for m in members))
+    if st.session_state.role == "Administrador":
+        st.markdown("#### Diagnóstico Google Drive")
+        if st.button("Comprobar acceso de Google Drive"):
+            try:
+                folder = drive_check_root(drive_client())
+                st.success(f"La cuenta OAuth puede acceder a la carpeta: {folder.get('name', 'Sin nombre')}.")
+            except DriveBackupError as exc:
+                st.error(str(exc))
     st.markdown("#### Facturas registradas")
     with db() as conn:
         result = pd.read_sql_query("""SELECT i.id AS 'Código',m.name AS 'Colaborador',
@@ -389,8 +464,12 @@ def public_register():
                     st.error("Factura duplicada: ya existe una con ese tipo, RUC, serie y número.")
                 except ValueError as exc:
                     st.error(str(exc))
-                except Exception:
-                    st.error("No se pudo completar el respaldo en Drive. Revisa permisos y configuración. No se guardó el registro.")
+                except DriveBackupError as exc:
+                    st.error(f"No se guardó el registro. {exc}")
+                except Exception as exc:
+                    import logging
+                    logging.exception("ALTIVIA: fallo inesperado durante el registro")
+                    st.error(f"No se guardó el registro. Error inesperado: {type(exc).__name__}. Revisa los logs privados.")
 
 
 st.markdown("""<style>
