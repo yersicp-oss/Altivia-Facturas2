@@ -392,14 +392,17 @@ def private_access():
 
 
 def public_register():
-    st.subheader("Registrar factura")
-    st.caption("Selecciona tu nombre, sube una foto o PDF y confirma los datos reconocidos.")
     members = list_members()
-    if not members:
-        st.warning("El administrador debe registrar primero a los miembros.")
+    selected_id = st.session_state.get("selected_member_id")
+    selected_member = next((m for m in members if m["id"] == selected_id), None)
+    if selected_member is None:
+        st.warning("Selecciona primero un colaborador activo en la pantalla de inicio.")
+        if st.button("Volver al inicio", key="missing_member"):
+            st.session_state.screen = "home"
+            st.rerun()
         return
-    member_by_name = {m["name"]: m["id"] for m in members}
-    member = st.selectbox("¿Quién registra la factura?", list(member_by_name))
+    st.subheader("Registrar factura")
+    st.info(f"Colaborador seleccionado: **{selected_member['name']}**")
     st.markdown("### 1. Selecciona un documento")
     st.caption("Foto desde tu celular, imagen existente o PDF original. Límite: 12 MB.")
     choices = [("📷 Tomar foto", "Usar cámara del teléfono"), ("▧ Subir fotografía", "JPG, PNG o WEBP"), ("▤ Subir PDF", "Comprobante digital o escaneado")]
@@ -455,7 +458,7 @@ def public_register():
                 st.error("Ingresa la fecha de emisión")
             else:
                 try:
-                    register(member_by_name[member], {"tipo":tipo, "serie":serie.strip(),
+                    register(selected_member["id"], {"tipo":tipo, "serie":serie.strip(),
                               "numero":numero.strip(), "fecha":fecha.isoformat(),
                               "proveedor":proveedor.strip(), "ruc":ruc.strip(), "total":total.strip()},
                               uploaded.getvalue(), uploaded.name)
@@ -480,9 +483,12 @@ st.markdown("""<style>
 .hero{text-align:center;padding:48px 6px 34px}
 .hero h1{font-size:2.4rem;margin:.4rem 0;color:#102c4b}
 .hero p{color:#667f9c}
+.altivia-home{text-align:center;padding:54px 0 35px}
+.altivia-name{font-size:clamp(3.5rem,9vw,6rem);font-weight:850;color:#102c4b;letter-spacing:.075em;line-height:1.1}
+.altivia-subtitle{font-size:clamp(1.7rem,4vw,2.5rem);font-weight:500;color:#1767ab;margin-top:8px}
 </style>""", unsafe_allow_html=True)
-navleft, navright = st.columns([4, 1])
-navleft.markdown("### A· ALTIVIA  <small style='font-size:13px;color:#7391ae'>FACTURAS</small>", unsafe_allow_html=True)
+# Pantalla limpia: acceso administrativo solamente en la esquina superior derecha.
+_, navright = st.columns([4, 1])
 if navright.button("Ingreso administrativo", use_container_width=True):
     st.session_state.screen = "admin"
     st.rerun()
@@ -490,17 +496,40 @@ page = st.session_state.get("screen", "home")
 if page != "home" and st.button("← Inicio", key="home_button"):
     st.session_state.screen = "home"
     st.session_state.upload_mode = None
+    st.session_state.image_stamp = None
+    st.session_state.extracted = dict(SCHEMA)
     st.rerun()
 if page == "home":
-    st.markdown('<div class="hero"><b style="color:#1767ab">ALTIVIA · GESTIÓN INTELIGENTE</b><h1>Bienvenido a la plataforma de facturas</h1><p>Selecciona tu nombre y registra un comprobante en pocos pasos.</p></div>', unsafe_allow_html=True)
-    center = st.columns([1,2,1])[1]
+    st.markdown("""<div class="altivia-home">
+        <div class="altivia-name">ALTIVIA</div>
+        <div class="altivia-subtitle">Facturas</div>
+    </div>""", unsafe_allow_html=True)
+    people = list_members()
+    center = st.columns([1, 1.12, 1])[1]
     with center:
-        st.markdown('<div class="upload-choice"><div class="upload-title">📷 Registrar factura</div><div class="upload-desc">Colaboradores · Sin contraseña</div></div>', unsafe_allow_html=True)
-        if st.button("Seleccionar mi nombre y subir comprobante →",type="primary",use_container_width=True):
-            st.session_state.screen="register"
-            st.rerun()
+        if not people:
+            st.warning("El administrador debe registrar colaboradores antes de usar el formulario.")
+        else:
+            names = {p["name"]: p["id"] for p in people}
+            st.markdown('<p style="text-align:center;font-weight:600;margin:0 0 8px">Selecciona tu nombre</p>', unsafe_allow_html=True)
+            with st.form("choose_member_home"):
+                chosen = st.selectbox(
+                    "Selecciona tu nombre", options=list(names), index=None,
+                    placeholder="Selecciona un colaborador...", key="home_member_select",
+                    label_visibility="collapsed"
+                )
+                go = st.form_submit_button("Registrar factura", type="primary", use_container_width=True)
+            if go:
+                if not chosen:
+                    st.error("Debes seleccionar un usuario antes de registrar una factura.")
+                else:
+                    st.session_state.selected_member_id = names[chosen]
+                    st.session_state.screen = "register"
+                    st.session_state.upload_mode = None
+                    st.session_state.image_stamp = None
+                    st.session_state.extracted = dict(SCHEMA)
+                    st.rerun()
 elif page == "register":
     public_register()
 else:
     private_access()
-st.caption("ALTIVIA CONSULTORES · Los comprobantes se guardan en Drive una vez confirmados. En Streamlit Community Cloud la base SQLite local no es persistente.")
