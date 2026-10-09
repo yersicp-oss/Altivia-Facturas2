@@ -391,88 +391,93 @@ def private_access():
                        file_name="ALTIVIA_facturas.csv", mime="text/csv")
 
 
+def direct_member_id():
+    """Registro sin identificación del colaborador, conservando la FK existente."""
+    with db() as conn:
+        conn.execute("INSERT OR IGNORE INTO members(name,active) VALUES (?,1)", ("Registro directo",))
+        conn.execute("UPDATE members SET active=1 WHERE name=?", ("Registro directo",))
+        row = conn.execute("SELECT id FROM members WHERE name=?", ("Registro directo",)).fetchone()
+        conn.commit()
+        return row["id"]
+
+
 def public_register():
-    members = list_members()
-    selected_id = st.session_state.get("selected_member_id")
-    selected_member = next((m for m in members if m["id"] == selected_id), None)
-    if selected_member is None:
-        st.warning("Selecciona primero un colaborador activo en la pantalla de inicio.")
-        if st.button("Volver al inicio", key="missing_member"):
-            st.session_state.screen = "home"
-            st.rerun()
-        return
     st.subheader("Registrar factura")
-    st.info(f"Colaborador seleccionado: **{selected_member['name']}**")
-    st.markdown("### 1. Selecciona un documento")
-    st.caption("Foto desde tu celular, imagen existente o PDF original. Límite: 12 MB.")
-    choices = [("📷 Tomar foto", "Usar cámara del teléfono"), ("▧ Subir fotografía", "JPG, PNG o WEBP"), ("▤ Subir PDF", "Comprobante digital o escaneado")]
-    cols = st.columns(3)
-    for i, ((title, description), col) in enumerate(zip(choices, cols)):
-        with col:
-            st.markdown(f'<div class="upload-choice"><div class="upload-title">{title}</div><div class="upload-desc">{description}</div></div>',unsafe_allow_html=True)
-            if st.button("Seleccionar", key=f"choose_{i}", use_container_width=True):
-                st.session_state.upload_mode = i
+    st.caption("Elige cómo enviar tu comprobante. Gemini lo analizará automáticamente.")
+    c1, c2 = st.columns(2)
+    options = [("📷 Tomar foto", "Abrir la cámara del teléfono"),
+               ("📎 Agregar documento", "Subir foto (JPG, PNG, WEBP) o PDF")]
+    for idx, (column, (title, description)) in enumerate(zip((c1, c2), options)):
+        with column:
+            st.markdown(f'<div class="upload-choice"><div class="upload-title">{title}</div><div class="upload-desc">{description}</div></div>', unsafe_allow_html=True)
+            if st.button("Elegir", key=f"mode_{idx}", use_container_width=True):
+                st.session_state.upload_mode = idx
+                st.session_state.image_stamp = None
+                st.session_state.extracted = dict(SCHEMA)
+                st.session_state.analysis_error = None
                 st.rerun()
-    selected = st.session_state.get("upload_mode")
-    if selected is None:
+    mode = st.session_state.get("upload_mode")
+    if mode is None:
         return
-    st.markdown("---")
-    if selected == 0:
-        uploaded = st.camera_input("Tomar fotografía")
-    elif selected == 1:
-        uploaded = st.file_uploader("Selecciona fotografía", type=["jpg", "jpeg", "png", "webp"],key="image_upload")
+    st.divider()
+    if mode == 0:
+        uploaded = st.camera_input("Tomar foto del comprobante", key="take_invoice_photo")
     else:
-        uploaded = st.file_uploader("Selecciona PDF", type=["pdf"],key="pdf_upload")
-    if uploaded:
-        stamp = hashlib.sha256(uploaded.getvalue()).hexdigest()
-        if st.session_state.get("image_stamp") != stamp:
-            st.session_state.image_stamp = stamp
-            st.session_state.extracted = dict(SCHEMA)
-        st.caption("El documento será procesado por Gemini. Al confirmar, se guardará el archivo original en Google Drive.")
-        if st.button("✨ Leer factura con IA", type="primary"):
-            with st.spinner("La IA está leyendo el comprobante..."):
-                try:
-                    st.session_state.extracted = recognize(uploaded)
-                    st.success("Lectura finalizada. Revisa los campos.")
-                except Exception as exc:
-                    st.warning(f"No se completó la lectura automática: {exc}")
-        vals = st.session_state.extracted
-        st.markdown("#### Verificar datos de factura")
-        with st.form("invoice_form"):
-            c1,c2,c3 = st.columns(3)
-            tipo = c1.selectbox("Tipo de comprobante", TYPES, index=TYPES.index(vals["tipo"]) if vals["tipo"] in TYPES else 0)
-            serie = c2.text_input("Serie", vals["serie"], placeholder="F001")
-            numero = c3.text_input("Número correlativo", vals["numero"], placeholder="000123")
-            c4,c5,c6 = st.columns(3)
+        uploaded = st.file_uploader("Agregar fotografía o PDF", type=["jpg", "jpeg", "png", "webp", "pdf"], key="invoice_doc_upload")
+    if uploaded is None:
+        return
+    data = uploaded.getvalue()
+    stamp = hashlib.sha256(data).hexdigest()
+    if st.session_state.get("image_stamp") != stamp:
+        st.session_state.image_stamp = stamp
+        st.session_state.extracted = dict(SCHEMA)
+        st.session_state.analysis_error = None
+        with st.spinner("Gemini está analizando la factura automáticamente..."):
             try:
-                parsed_date = date.fromisoformat(vals["fecha"])
-            except ValueError:
-                parsed_date = None
-            fecha = c4.date_input("Fecha de emisión", value=parsed_date, format="DD/MM/YYYY", min_value=date(2000,1,1))
-            proveedor = c5.text_input("Proveedor / razón social", vals["proveedor"])
-            ruc = c6.text_input("RUC del proveedor", vals["ruc"], max_chars=11)
-            total = st.text_input("Importe total", vals["total"], placeholder="150.00")
-            submit = st.form_submit_button("✓ Confirmar y guardar factura", type="primary")
-        if submit:
-            if not fecha:
-                st.error("Ingresa la fecha de emisión")
-            else:
-                try:
-                    register(selected_member["id"], {"tipo":tipo, "serie":serie.strip(),
-                              "numero":numero.strip(), "fecha":fecha.isoformat(),
-                              "proveedor":proveedor.strip(), "ruc":ruc.strip(), "total":total.strip()},
-                              uploaded.getvalue(), uploaded.name)
-                    st.success("Factura registrada y documento respaldado en Google Drive.")
-                except sqlite3.IntegrityError:
-                    st.error("Factura duplicada: ya existe una con ese tipo, RUC, serie y número.")
-                except ValueError as exc:
-                    st.error(str(exc))
-                except DriveBackupError as exc:
-                    st.error(f"No se guardó el registro. {exc}")
-                except Exception as exc:
-                    import logging
-                    logging.exception("ALTIVIA: fallo inesperado durante el registro")
-                    st.error(f"No se guardó el registro. Error inesperado: {type(exc).__name__}. Revisa los logs privados.")
+                st.session_state.extracted = recognize(uploaded)
+            except Exception as exc:
+                st.session_state.analysis_error = str(exc)
+    if st.session_state.get("analysis_error"):
+        st.warning("No fue posible reconocer todos los datos automáticamente. " + st.session_state.analysis_error + " Puedes completarlos manualmente.")
+    else:
+        st.success("Lectura automática finalizada. Verifica los datos antes de guardar.")
+    vals = st.session_state.extracted
+    st.markdown("#### Verificar datos de factura")
+    with st.form("invoice_form"):
+        c1,c2,c3 = st.columns(3)
+        tipo = c1.selectbox("Tipo de comprobante", TYPES, index=TYPES.index(vals["tipo"]) if vals["tipo"] in TYPES else 0)
+        serie = c2.text_input("Serie", vals["serie"], placeholder="F001")
+        numero = c3.text_input("Número correlativo", vals["numero"], placeholder="000123")
+        c4,c5,c6 = st.columns(3)
+        try:
+            parsed_date = date.fromisoformat(vals["fecha"])
+        except ValueError:
+            parsed_date = None
+        fecha = c4.date_input("Fecha de emisión", value=parsed_date, format="DD/MM/YYYY", min_value=date(2000,1,1))
+        proveedor = c5.text_input("Proveedor / razón social", vals["proveedor"])
+        ruc = c6.text_input("RUC del proveedor", vals["ruc"], max_chars=11)
+        total = st.text_input("Importe total", vals["total"], placeholder="150.00")
+        submit = st.form_submit_button("✓ Confirmar y guardar factura", type="primary")
+    if submit:
+        if not fecha:
+            st.error("Ingresa la fecha de emisión")
+        else:
+            try:
+                register(direct_member_id(), {"tipo":tipo, "serie":serie.strip(),
+                          "numero":numero.strip(), "fecha":fecha.isoformat(),
+                          "proveedor":proveedor.strip(), "ruc":ruc.strip(), "total":total.strip()},
+                          data, uploaded.name)
+                st.success("Factura registrada y documento respaldado en Google Drive.")
+            except sqlite3.IntegrityError:
+                st.error("Factura duplicada: ya existe una con ese tipo, RUC, serie y número.")
+            except ValueError as exc:
+                st.error(str(exc))
+            except DriveBackupError as exc:
+                st.error(f"No se guardó el registro. {exc}")
+            except Exception as exc:
+                import logging
+                logging.exception("ALTIVIA: fallo inesperado durante el registro")
+                st.error(f"No se guardó el registro. Error inesperado: {type(exc).__name__}. Revisa los logs privados.")
 
 
 st.markdown("""<style>
@@ -504,31 +509,15 @@ if page == "home":
         <div class="altivia-name">ALTIVIA</div>
         <div class="altivia-subtitle">Facturas</div>
     </div>""", unsafe_allow_html=True)
-    people = list_members()
     center = st.columns([1, 1.12, 1])[1]
     with center:
-        if not people:
-            st.warning("El administrador debe registrar colaboradores antes de usar el formulario.")
-        else:
-            names = {p["name"]: p["id"] for p in people}
-            st.markdown('<p style="text-align:center;font-weight:600;margin:0 0 8px">Selecciona tu nombre</p>', unsafe_allow_html=True)
-            with st.form("choose_member_home"):
-                chosen = st.selectbox(
-                    "Selecciona tu nombre", options=list(names), index=None,
-                    placeholder="Selecciona un colaborador...", key="home_member_select",
-                    label_visibility="collapsed"
-                )
-                go = st.form_submit_button("Registrar factura", type="primary", use_container_width=True)
-            if go:
-                if not chosen:
-                    st.error("Debes seleccionar un usuario antes de registrar una factura.")
-                else:
-                    st.session_state.selected_member_id = names[chosen]
-                    st.session_state.screen = "register"
-                    st.session_state.upload_mode = None
-                    st.session_state.image_stamp = None
-                    st.session_state.extracted = dict(SCHEMA)
-                    st.rerun()
+        if st.button("Registrar factura", type="primary", use_container_width=True):
+            st.session_state.screen = "register"
+            st.session_state.upload_mode = None
+            st.session_state.image_stamp = None
+            st.session_state.extracted = dict(SCHEMA)
+            st.session_state.analysis_error = None
+            st.rerun()
 elif page == "register":
     public_register()
 else:
