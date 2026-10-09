@@ -1,5 +1,4 @@
 """ALTIVIA Facturas Streamlit Lite — versión prototipo sin almacenamiento persistente."""
-import base64
 import hashlib
 import io
 import json
@@ -10,7 +9,8 @@ from pathlib import Path
 
 import pandas as pd
 import streamlit as st
-from openai import OpenAI
+from google import genai
+from google.genai import types
 from PIL import Image, ImageOps, UnidentifiedImageError
 
 st.set_page_config(page_title="ALTIVIA | Facturas", page_icon="🧾", layout="wide")
@@ -86,9 +86,10 @@ def parse_json(raw):
 
 
 def recognize(upload):
-    key = st.secrets.get("OPENAI_API_KEY", "")
-    if not key:
-        raise ValueError("Falta OPENAI_API_KEY en los Secrets de Streamlit")
+    """Extrae exclusivamente los siete campos usando Gemini, sin OCR local."""
+    key = st.secrets.get("GEMINI_API_KEY", "")
+    if not key or str(key).startswith("TU_CLAVE"):
+        raise ValueError("Falta configurar GEMINI_API_KEY en Secrets de Streamlit")
     content = upload.getvalue()
     if len(content) > 12 * 1024 * 1024:
         raise ValueError("Máximo 12 MB por archivo")
@@ -99,24 +100,47 @@ def recognize(upload):
             pictures = [prep_image(content)]
         except (UnidentifiedImageError, OSError) as exc:
             raise ValueError("La imagen está dañada o no es compatible") from exc
-    payload = [{"type": "text", "text": (
-        "Lee el comprobante peruano de la(s) imagen(es). Responde SOLO JSON válido con "
-        "estas siete claves exactas: tipo, serie, numero, fecha, proveedor, ruc, total. "
-        "Tipo: Factura/Boleta/Nota de crédito/Otro. fecha: AAAA-MM-DD. "
-        "Total: valor numérico sin moneda ni símbolos, punto decimal. "
-        "Número correlativo y serie van separados. RUC es exactamente 11 dígitos si aparece. "
-        "No inventes datos; si un dato no está legible responde cadena vacía. "
-        "Si hay varios importes elige solamente el importe total a pagar."
-    )}]
-    for img in pictures:
-        data_url = "data:image/jpeg;base64," + base64.b64encode(img).decode("ascii")
-        payload.append({"type": "image_url", "image_url": {"url": data_url, "detail": "low"}})
-    client = OpenAI(api_key=key, timeout=23.0, max_retries=0)
-    response = client.chat.completions.create(
-        model="gpt-4.1-mini", messages=[{"role": "user", "content": payload}],
-        temperature=0, response_format={"type": "json_object"}, max_tokens=280
+
+    instructions = (
+        "Lee el comprobante peruano de la(s) imagen(es). Responde SOLO JSON válido "
+        "con estas siete claves exactas: tipo, serie, numero, fecha, proveedor, ruc, total. "
+        "tipo debe ser Factura, Boleta, Nota de crédito u Otro. "
+        "fecha en AAAA-MM-DD; total numérico sin símbolos, con punto decimal. "
+        "Separa la serie del número correlativo. Conserva ceros a la izquierda. "
+        "RUC de exactamente 11 dígitos si aparece. No inventes información, "
+        "si falta o es ilegible escribe cadena vacía. "
+        "Si hay varios importes identifica únicamente el importe total a pagar."
     )
-    return parse_json(response.choices[0].message.content or "{}")
+    contents = [instructions] + [
+        types.Part.from_bytes(data=image, mime_type="image/jpeg") for image in pictures
+    ]
+    model = st.secrets.get("GEMINI_MODEL", "gemini-2.5-flash-lite")
+    try:
+        with genai.Client(api_key=key, http_options=types.HttpOptions(timeout=30000)) as client:
+            response = client.models.generate_content(
+                model=model,
+                contents=contents,
+                config=types.GenerateContentConfig(
+                    response_mime_type="application/json",
+                    max_output_tokens=480,
+                    temperature=0,
+                ),
+            )
+        if not response.text:
+            raise ValueError("Gemini no devolvió texto. Prueba otra fotografía.")
+        return parse_json(response.text)
+    except ValueError:
+        raise
+    except Exception as exc:
+        # No mostrar claves, payloads o trazas del proveedor en la interfaz.
+        msg = str(exc).lower()
+        if "429" in msg or "resource_exhausted" in msg:
+            raise ValueError("Gemini alcanzó el límite de solicitudes o cuota. Intenta más tarde.") from None
+        if "403" in msg or "permission_denied" in msg or "api_key_invalid" in msg or "400 api key" in msg:
+            raise ValueError("La clave de Gemini no tiene acceso. Revisa Google AI Studio y Secrets.") from None
+        if "404" in msg or "not found" in msg:
+            raise ValueError("Modelo de Gemini no disponible. Revisa GEMINI_MODEL.") from None
+        raise ValueError("No se pudo completar la lectura con Gemini. Revisa los logs privados de Streamlit.") from None
 
 
 def money(v):
