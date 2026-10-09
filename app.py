@@ -6,6 +6,11 @@ import re
 import sqlite3
 from datetime import date, datetime
 from pathlib import Path
+from datetime import timezone
+from google.oauth2.credentials import Credentials
+from googleapiclient.discovery import build
+from googleapiclient.http import MediaIoBaseUpload
+from google.auth.transport.requests import Request
 
 import pandas as pd
 import streamlit as st
@@ -15,6 +20,7 @@ from PIL import Image, ImageOps, UnidentifiedImageError
 
 st.set_page_config(page_title="ALTIVIA | Facturas", page_icon="🧾", layout="wide")
 DB_PATH = Path("altivia_demo.db")
+DRIVE_ROOT_ID = "1rOoOcJ9SXHHc9BX6tLHjDIfE2_SqkeA1"
 TYPES = ["Factura", "Boleta", "Nota de crédito", "Otro"]
 SCHEMA = {"tipo": "", "serie": "", "numero": "", "fecha": "", "proveedor": "", "ruc": "", "total": ""}
 
@@ -36,6 +42,10 @@ def db():
         proveedor TEXT NOT NULL, ruc TEXT NOT NULL, total REAL NOT NULL,
         created_at TEXT NOT NULL, UNIQUE(tipo,ruc,serie,numero),
         FOREIGN KEY(member_id) REFERENCES members(id))""")
+    columns = {r[1] for r in conn.execute("PRAGMA table_info(invoices)").fetchall()}
+    for column in ("drive_file_id", "drive_url", "drive_status"):
+        if column not in columns:
+            conn.execute(f"ALTER TABLE invoices ADD COLUMN {column} TEXT")
     conn.commit()
     return conn
 
@@ -153,7 +163,70 @@ def money(v):
     return n
 
 
-def register(member_id, vals):
+def drive_client():
+    """OAuth offline-user credentials. Never expose these secrets to browser/GitHub."""
+    settings = st.secrets
+    required = ["GOOGLE_CLIENT_ID", "GOOGLE_CLIENT_SECRET", "GOOGLE_REFRESH_TOKEN"]
+    missing = [key for key in required if not settings.get(key)]
+    if missing:
+        raise ValueError("Google Drive no está configurado: falta " + ", ".join(missing))
+    creds = Credentials(
+        token=None,
+        refresh_token=settings["GOOGLE_REFRESH_TOKEN"],
+        token_uri="https://oauth2.googleapis.com/token",
+        client_id=settings["GOOGLE_CLIENT_ID"],
+        client_secret=settings["GOOGLE_CLIENT_SECRET"],
+        scopes=["https://www.googleapis.com/auth/drive"],
+    )
+    creds.refresh(Request())
+    return build("drive", "v3", credentials=creds, cache_discovery=False)
+
+
+def drive_folder(service, name, parent):
+    """Find/create month or date folder beneath a known parent."""
+    escaped = name.replace("\\", "\\\\").replace("'", "\\'")
+    q = f"name = '{escaped}' and mimeType = 'application/vnd.google-apps.folder' and '{parent}' in parents and trashed = false"
+    result = service.files().list(q=q, fields="files(id,name),nextPageToken", page_size=50).execute()
+    if result.get("files"):
+        return result["files"][0]["id"]
+    created = service.files().create(
+        body={"name": name, "mimeType": "application/vnd.google-apps.folder", "parents": [parent]},
+        fields="id",
+    ).execute()
+    return created["id"]
+
+
+def drive_upload(file_bytes, original_name, invoice_values):
+    """Save immutable original under FACTURAS / YYYY-MM / DD-MM-YYYY."""
+    service = drive_client()
+    issued = date.fromisoformat(invoice_values["fecha"])
+    month = drive_folder(service, issued.strftime("%Y-%m"), DRIVE_ROOT_ID)
+    day = drive_folder(service, issued.strftime("%d-%m-%Y"), month)
+    ext = Path(original_name).suffix.lower()
+    if ext not in (".jpg", ".jpeg", ".png", ".webp", ".pdf"):
+        raise ValueError("Extensión de archivo no admitida")
+    serie = invoice_values["serie"].upper()
+    numero = invoice_values["numero"].upper()
+    ruc = invoice_values["ruc"]
+    name = f"{serie}-{numero}-{ruc}{ext}"
+    mime = {".jpg":"image/jpeg", ".jpeg":"image/jpeg", ".png":"image/png", ".webp":"image/webp", ".pdf":"application/pdf"}[ext]
+    # In case a previous upload succeeded but the database request failed, avoid duplicates.
+    escaped = name.replace("\\", "\\\\").replace("'", "\\'")
+    q = f"name = '{escaped}' and '{day}' in parents and trashed = false"
+    existing = service.files().list(q=q, fields="files(id,webViewLink),nextPageToken", page_size=10).execute().get("files", [])
+    if existing:
+        fid = existing[0]["id"]
+        return fid, existing[0].get("webViewLink") or f"https://drive.google.com/file/d/{fid}/view"
+    media = MediaIoBaseUpload(io.BytesIO(file_bytes), mimetype=mime, resumable=False)
+    created = service.files().create(
+        body={"name":name,"parents":[day],"description":"ALTIVIA - comprobante original"},
+        media_body=media, fields="id,webViewLink",
+    ).execute()
+    fid = created["id"]
+    return fid, created.get("webViewLink") or f"https://drive.google.com/file/d/{fid}/view"
+
+
+def register(member_id, vals, original_bytes, original_name):
     if vals["tipo"] not in TYPES:
         raise ValueError("Tipo inválido")
     if not re.fullmatch(r"[A-Za-z0-9-]{1,12}", vals["serie"]):
@@ -171,13 +244,19 @@ def register(member_id, vals):
     if not 2 <= len(vals["proveedor"]) <= 180:
         raise ValueError("Ingresa la razón social")
     with db() as conn:
+        duplicate = conn.execute("SELECT 1 FROM invoices WHERE tipo=? AND ruc=? AND serie=? AND numero=?", (vals["tipo"], vals["ruc"], vals["serie"].upper(), vals["numero"])).fetchone()
+        if duplicate:
+            raise ValueError("Factura duplicada: ya está registrada")
         member = conn.execute("SELECT 1 FROM members WHERE id=? AND active=1", (member_id,)).fetchone()
         if not member:
             raise ValueError("El colaborador seleccionado ya no está activo")
-        conn.execute("""INSERT INTO invoices(member_id,tipo,serie,numero,fecha,proveedor,ruc,total,created_at)
-                        VALUES (?,?,?,?,?,?,?,?,?)""", (
+        # Upload first: do not mark invoice registered if backup failed.
+        fid, link = drive_upload(original_bytes, original_name, vals)
+        conn.execute("""INSERT INTO invoices(member_id,tipo,serie,numero,fecha,proveedor,ruc,total,created_at,drive_file_id,drive_url,drive_status)
+                        VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""", (
             member_id, vals["tipo"], vals["serie"].upper(), vals["numero"], vals["fecha"],
-            vals["proveedor"], vals["ruc"], money(vals["total"]), datetime.now().isoformat(timespec="seconds")
+            vals["proveedor"], vals["ruc"], money(vals["total"]), datetime.now().isoformat(timespec="seconds"),
+            fid, link, "Guardado en Drive"
         ))
         conn.commit()
 
@@ -230,7 +309,7 @@ def private_access():
         result = pd.read_sql_query("""SELECT i.id AS 'Código',m.name AS 'Colaborador',
            i.tipo AS 'Tipo',i.serie AS 'Serie',i.numero AS 'Número',i.fecha AS 'Fecha emisión',
            i.proveedor AS 'Proveedor',i.ruc AS 'RUC',i.total AS 'Importe',
-           i.created_at AS 'Registrada el' FROM invoices i JOIN members m ON m.id=i.member_id
+           i.created_at AS 'Registrada el',i.drive_url AS 'Respaldo en Drive' FROM invoices i JOIN members m ON m.id=i.member_id
            ORDER BY i.id DESC""", conn)
     st.dataframe(result, use_container_width=True, hide_index=True)
     st.download_button("⬇ Exportar CSV", result.to_csv(index=False).encode("utf-8-sig"),
@@ -246,19 +325,32 @@ def public_register():
         return
     member_by_name = {m["name"]: m["id"] for m in members}
     member = st.selectbox("¿Quién registra la factura?", list(member_by_name))
-    mode = st.radio("Documento", ["Tomar foto", "Subir imagen", "Subir PDF"], horizontal=True)
-    if mode == "Tomar foto":
+    st.markdown("### 1. Selecciona un documento")
+    st.caption("Foto desde tu celular, imagen existente o PDF original. Límite: 12 MB.")
+    choices = [("📷 Tomar foto", "Usar cámara del teléfono"), ("▧ Subir fotografía", "JPG, PNG o WEBP"), ("▤ Subir PDF", "Comprobante digital o escaneado")]
+    cols = st.columns(3)
+    for i, ((title, description), col) in enumerate(zip(choices, cols)):
+        with col:
+            st.markdown(f'<div class="upload-choice"><div class="upload-title">{title}</div><div class="upload-desc">{description}</div></div>',unsafe_allow_html=True)
+            if st.button("Seleccionar", key=f"choose_{i}", use_container_width=True):
+                st.session_state.upload_mode = i
+                st.rerun()
+    selected = st.session_state.get("upload_mode")
+    if selected is None:
+        return
+    st.markdown("---")
+    if selected == 0:
         uploaded = st.camera_input("Tomar fotografía")
-    elif mode == "Subir imagen":
-        uploaded = st.file_uploader("Selecciona imagen", type=["jpg", "jpeg", "png", "webp"])
+    elif selected == 1:
+        uploaded = st.file_uploader("Selecciona fotografía", type=["jpg", "jpeg", "png", "webp"],key="image_upload")
     else:
-        uploaded = st.file_uploader("Selecciona PDF", type=["pdf"])
+        uploaded = st.file_uploader("Selecciona PDF", type=["pdf"],key="pdf_upload")
     if uploaded:
         stamp = hashlib.sha256(uploaded.getvalue()).hexdigest()
         if st.session_state.get("image_stamp") != stamp:
             st.session_state.image_stamp = stamp
             st.session_state.extracted = dict(SCHEMA)
-        st.caption("El archivo será enviado al servicio de IA para sugerir los datos. No se guardará una copia documental.")
+        st.caption("El documento será procesado por Gemini. Al confirmar, se guardará el archivo original en Google Drive.")
         if st.button("✨ Leer factura con IA", type="primary"):
             with st.spinner("La IA está leyendo el comprobante..."):
                 try:
@@ -290,19 +382,46 @@ def public_register():
                 try:
                     register(member_by_name[member], {"tipo":tipo, "serie":serie.strip(),
                               "numero":numero.strip(), "fecha":fecha.isoformat(),
-                              "proveedor":proveedor.strip(), "ruc":ruc.strip(), "total":total.strip()})
-                    st.success("Factura registrada. El administrador puede verla en su panel.")
+                              "proveedor":proveedor.strip(), "ruc":ruc.strip(), "total":total.strip()},
+                              uploaded.getvalue(), uploaded.name)
+                    st.success("Factura registrada y documento respaldado en Google Drive.")
                 except sqlite3.IntegrityError:
                     st.error("Factura duplicada: ya existe una con ese tipo, RUC, serie y número.")
                 except ValueError as exc:
                     st.error(str(exc))
+                except Exception:
+                    st.error("No se pudo completar el respaldo en Drive. Revisa permisos y configuración. No se guardó el registro.")
 
 
-st.title("A. ALTIVIA  |  Gestión de facturas")
-st.caption("Versión ligera para Streamlit · Reconocimiento visual con IA, sin Tesseract")
-st.info("Prototipo de pruebas: el servidor gratuito no garantiza conservar los registros. No cargar comprobantes reales hasta conectar almacenamiento permanente.", icon="⚠️")
-mode = st.sidebar.radio("Menú", ["Registrar factura", "Acceso privado"])
-if mode == "Registrar factura":
+st.markdown("""<style>
+.block-container{max-width:1250px;padding-top:1.25rem}
+.upload-choice{background:#f3f9ff;border:2px dashed #bad7f5;border-radius:14px;padding:32px 12px;text-align:center;min-height:130px}
+.upload-title{font-size:1.25rem;color:#102c4b;font-weight:750}
+.upload-desc{font-size:.86rem;color:#6b86a8;margin-top:10px}
+.hero{text-align:center;padding:48px 6px 34px}
+.hero h1{font-size:2.4rem;margin:.4rem 0;color:#102c4b}
+.hero p{color:#667f9c}
+</style>""", unsafe_allow_html=True)
+navleft, navright = st.columns([4, 1])
+navleft.markdown("### A· ALTIVIA  <small style='font-size:13px;color:#7391ae'>FACTURAS</small>", unsafe_allow_html=True)
+if navright.button("Ingreso administrativo", use_container_width=True):
+    st.session_state.screen = "admin"
+    st.rerun()
+page = st.session_state.get("screen", "home")
+if page != "home" and st.button("← Inicio", key="home_button"):
+    st.session_state.screen = "home"
+    st.session_state.upload_mode = None
+    st.rerun()
+if page == "home":
+    st.markdown('<div class="hero"><b style="color:#1767ab">ALTIVIA · GESTIÓN INTELIGENTE</b><h1>Bienvenido a la plataforma de facturas</h1><p>Selecciona tu nombre y registra un comprobante en pocos pasos.</p></div>', unsafe_allow_html=True)
+    center = st.columns([1,2,1])[1]
+    with center:
+        st.markdown('<div class="upload-choice"><div class="upload-title">📷 Registrar factura</div><div class="upload-desc">Colaboradores · Sin contraseña</div></div>', unsafe_allow_html=True)
+        if st.button("Seleccionar mi nombre y subir comprobante →",type="primary",use_container_width=True):
+            st.session_state.screen="register"
+            st.rerun()
+elif page == "register":
     public_register()
 else:
     private_access()
+st.caption("ALTIVIA CONSULTORES · Los comprobantes se guardan en Drive una vez confirmados. En Streamlit Community Cloud la base SQLite local no es persistente.")
