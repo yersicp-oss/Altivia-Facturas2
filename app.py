@@ -405,56 +405,42 @@ def direct_member_id():
         return row["id"]
 
 
-class CapturedPhoto:
-    """Adaptador para reutilizar recognize() y register() sin modificar Gemini/Drive."""
-    def __init__(self, photo):
-        self.name = Path(photo.get("filename", "factura.jpg")).name
-        if Path(self.name).suffix.lower() not in (".jpg", ".jpeg", ".png", ".webp"):
-            self.name = "factura.jpg"
-        self._data = base64.b64decode(photo["data"], validate=True)
+class UploadedInvoice:
+    """Archivo capturado en el componente web, con interfaz compatible con Gemini y Drive."""
+    def __init__(self, payload):
+        self.name = Path(str(payload.get("filename") or "factura.jpg")).name
+        self._data = base64.b64decode(payload["data"], validate=True)
         if not self._data or len(self._data) > 12 * 1024 * 1024:
-            raise ValueError("Fotografía vacía o superior a 12 MB")
-        with Image.open(io.BytesIO(self._data)) as im:
-            im.verify()
+            raise ValueError("El archivo debe ocupar menos de 12 MB")
+        ext = Path(self.name).suffix.lower()
+        if ext == ".pdf":
+            if not self._data.startswith(b"%PDF"):
+                raise ValueError("El PDF no es válido")
+        elif ext in (".jpg", ".jpeg", ".png", ".webp"):
+            with Image.open(io.BytesIO(self._data)) as im:
+                im.verify()
+        else:
+            raise ValueError("Solo se permiten imágenes JPG, PNG, WEBP o PDF")
+
     def getvalue(self):
         return self._data
 
 
-def native_camera_photo():
-    """El navegador abre la cámara del teléfono; admite un selector en otros dispositivos."""
-    result = CAMARA_NATIVA(key="altivia_camera_capture")
+def selected_invoice_document():
+    """Ambas tarjetas son controles reales en un componente bidireccional."""
+    result = CAMARA_NATIVA(key="altivia_document_cards_v7")
     if not result:
         return None
     try:
-        return CapturedPhoto(result)
+        return UploadedInvoice(result)
     except (ValueError, OSError, KeyError, TypeError) as exc:
-        st.error(f"No se pudo recibir la fotografía: {exc}")
+        st.error(f"No se pudo recibir el archivo: {exc}")
         return None
 
 
 def public_register():
     st.subheader("Registrar factura")
-    st.caption("Elige cómo enviar tu comprobante. Gemini lo analizará automáticamente.")
-    c1, c2 = st.columns(2)
-    options = [("📷 Tomar foto", "Abrir la cámara del teléfono"),
-               ("📎 Agregar documento", "Subir foto (JPG, PNG, WEBP) o PDF")]
-    for idx, (column, (title, description)) in enumerate(zip((c1, c2), options)):
-        with column:
-            st.markdown(f'<div class="upload-choice"><div class="upload-title">{title}</div><div class="upload-desc">{description}</div></div>', unsafe_allow_html=True)
-            if st.button("Elegir", key=f"mode_{idx}", use_container_width=True):
-                st.session_state.upload_mode = idx
-                st.session_state.image_stamp = None
-                st.session_state.extracted = dict(SCHEMA)
-                st.session_state.analysis_error = None
-                st.rerun()
-    mode = st.session_state.get("upload_mode")
-    if mode is None:
-        return
-    st.divider()
-    if mode == 0:
-        uploaded = native_camera_photo()
-    else:
-        uploaded = st.file_uploader("Agregar fotografía o PDF", type=["jpg", "jpeg", "png", "webp", "pdf"], key="invoice_doc_upload")
+    uploaded = selected_invoice_document()
     if uploaded is None:
         return
     data = uploaded.getvalue()
@@ -513,9 +499,6 @@ def public_register():
 
 st.markdown("""<style>
 .block-container{max-width:1250px;padding-top:1.25rem}
-.upload-choice{background:#f3f9ff;border:2px dashed #bad7f5;border-radius:14px;padding:32px 12px;text-align:center;min-height:130px}
-.upload-title{font-size:1.25rem;color:#102c4b;font-weight:750}
-.upload-desc{font-size:.86rem;color:#6b86a8;margin-top:10px}
 .hero{text-align:center;padding:48px 6px 34px}
 .hero h1{font-size:2.4rem;margin:.4rem 0;color:#102c4b}
 .hero p{color:#667f9c}
