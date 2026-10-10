@@ -503,7 +503,7 @@ def public_register():
 st.markdown("""<style>
 .block-container{max-width:1250px;padding-top:1.25rem}
 .altivia-register-brand{margin:1rem 0 1.45rem;text-align:left}
-.altivia-register-title{font-size:clamp(2.3rem,5vw,3.5rem);font-weight:850;color:#102c4b;letter-spacing:.055em;line-height:1.12}
+.altivia-register-title{font-size:clamp(2.3rem,5vw,3.5rem);font-weight:1850;color:#102c4b;letter-spacing:.055em;line-height:1.12}
 .altivia-register-subtitle{font-size:clamp(1.35rem,3vw,1.95rem);font-weight:550;color:#1767ab;margin-top:3px}
 @media(max-width:590px){.altivia-register-brand{margin:.7rem 0 1.1rem}}
 </style>""", unsafe_allow_html=True)
