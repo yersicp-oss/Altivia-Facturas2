@@ -1,5 +1,6 @@
 """ALTIVIA Facturas Streamlit Lite — versión prototipo sin almacenamiento persistente."""
 import hashlib
+import base64
 import io
 import json
 import re
@@ -16,6 +17,7 @@ from googleapiclient.errors import HttpError
 
 import pandas as pd
 import streamlit as st
+import streamlit.components.v1 as components
 from google import genai
 from google.genai import types
 from PIL import Image, ImageOps, UnidentifiedImageError
@@ -25,6 +27,8 @@ DB_PATH = Path("altivia_demo.db")
 DRIVE_ROOT_ID = "1rOoOcJ9SXHHc9BX6tLHjDIfE2_SqkeA1"
 TYPES = ["Factura", "Boleta", "Nota de crédito", "Otro"]
 SCHEMA = {"tipo": "", "serie": "", "numero": "", "fecha": "", "proveedor": "", "ruc": "", "total": ""}
+CAMARA_NATIVA = components.declare_component("altivia_native_camera_v6", path=str(Path(__file__).parent / "camera_native"))
+
 
 st.markdown("""<style>
 .block-container {max-width:1150px; padding-top:2rem}
@@ -401,6 +405,33 @@ def direct_member_id():
         return row["id"]
 
 
+class CapturedPhoto:
+    """Adaptador para reutilizar recognize() y register() sin modificar Gemini/Drive."""
+    def __init__(self, photo):
+        self.name = Path(photo.get("filename", "factura.jpg")).name
+        if Path(self.name).suffix.lower() not in (".jpg", ".jpeg", ".png", ".webp"):
+            self.name = "factura.jpg"
+        self._data = base64.b64decode(photo["data"], validate=True)
+        if not self._data or len(self._data) > 12 * 1024 * 1024:
+            raise ValueError("Fotografía vacía o superior a 12 MB")
+        with Image.open(io.BytesIO(self._data)) as im:
+            im.verify()
+    def getvalue(self):
+        return self._data
+
+
+def native_camera_photo():
+    """El navegador abre la cámara del teléfono; admite un selector en otros dispositivos."""
+    result = CAMARA_NATIVA(key="altivia_camera_capture")
+    if not result:
+        return None
+    try:
+        return CapturedPhoto(result)
+    except (ValueError, OSError, KeyError, TypeError) as exc:
+        st.error(f"No se pudo recibir la fotografía: {exc}")
+        return None
+
+
 def public_register():
     st.subheader("Registrar factura")
     st.caption("Elige cómo enviar tu comprobante. Gemini lo analizará automáticamente.")
@@ -421,7 +452,7 @@ def public_register():
         return
     st.divider()
     if mode == 0:
-        uploaded = st.camera_input("Tomar foto del comprobante", key="take_invoice_photo")
+        uploaded = native_camera_photo()
     else:
         uploaded = st.file_uploader("Agregar fotografía o PDF", type=["jpg", "jpeg", "png", "webp", "pdf"], key="invoice_doc_upload")
     if uploaded is None:
