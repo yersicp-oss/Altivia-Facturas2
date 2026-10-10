@@ -439,7 +439,10 @@ def selected_invoice_document():
 
 
 def public_register():
-    st.subheader("Registrar factura")
+    st.markdown("""<div class="altivia-register-brand">
+        <div class="altivia-register-title">ALTIVIA</div>
+        <div class="altivia-register-subtitle">Facturas</div>
+    </div>""", unsafe_allow_html=True)
     uploaded = selected_invoice_document()
     if uploaded is None:
         return
@@ -499,40 +502,21 @@ def public_register():
 
 st.markdown("""<style>
 .block-container{max-width:1250px;padding-top:1.25rem}
-.hero{text-align:center;padding:48px 6px 34px}
-.hero h1{font-size:2.4rem;margin:.4rem 0;color:#102c4b}
-.hero p{color:#667f9c}
-.altivia-home{text-align:center;padding:54px 0 35px}
-.altivia-name{font-size:clamp(3.5rem,9vw,6rem);font-weight:850;color:#102c4b;letter-spacing:.075em;line-height:1.1}
-.altivia-subtitle{font-size:clamp(1.7rem,4vw,2.5rem);font-weight:500;color:#1767ab;margin-top:8px}
+.altivia-register-brand{margin:1rem 0 1.45rem;text-align:left}
+.altivia-register-title{font-size:clamp(2.3rem,5vw,3.5rem);font-weight:850;color:#102c4b;letter-spacing:.055em;line-height:1.12}
+.altivia-register-subtitle{font-size:clamp(1.35rem,3vw,1.95rem);font-weight:550;color:#1767ab;margin-top:3px}
+@media(max-width:590px){.altivia-register-brand{margin:.7rem 0 1.1rem}}
 </style>""", unsafe_allow_html=True)
-# Pantalla limpia: acceso administrativo solamente en la esquina superior derecha.
+# La pantalla principal ES el registro: no existe una bienvenida ni una navegación intermedia.
 _, navright = st.columns([4, 1])
 if navright.button("Ingreso administrativo", use_container_width=True):
     st.session_state.screen = "admin"
     st.rerun()
-page = st.session_state.get("screen", "home")
-if page != "home" and st.button("← Inicio", key="home_button"):
-    st.session_state.screen = "home"
-    st.session_state.upload_mode = None
-    st.session_state.image_stamp = None
-    st.session_state.extracted = dict(SCHEMA)
-    st.rerun()
-if page == "home":
-    st.markdown("""<div class="altivia-home">
-        <div class="altivia-name">ALTIVIA</div>
-        <div class="altivia-subtitle">Facturas</div>
-    </div>""", unsafe_allow_html=True)
-    center = st.columns([1, 1.12, 1])[1]
-    with center:
-        if st.button("Registrar factura", type="primary", use_container_width=True):
-            st.session_state.screen = "register"
-            st.session_state.upload_mode = None
-            st.session_state.image_stamp = None
-            st.session_state.extracted = dict(SCHEMA)
-            st.session_state.analysis_error = None
-            st.rerun()
-elif page == "register":
-    public_register()
-else:
+page = st.session_state.get("screen", "register")
+if page == "admin":
+    if st.button("← Volver a facturas", key="back_to_registration"):
+        st.session_state.screen = "register"
+        st.rerun()
     private_access()
+else:
+    public_register()
