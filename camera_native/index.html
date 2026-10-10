@@ -1,0 +1,33 @@
+<!DOCTYPE html>
+<html lang="es"><head><meta charset="utf-8"/><meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1"/>
+<style>
+*{box-sizing:border-box}body{margin:0;font:15px system-ui,-apple-system,sans-serif;background:transparent;color:#12304e}
+#launch{display:block;width:100%;padding:15px 16px;border:0;border-radius:10px;background:#1767ab;color:#fff;font-weight:700;font-size:16px;cursor:pointer}
+#input{position:absolute;opacity:0;width:1px;height:1px;pointer-events:none}
+#status{text-align:center;color:#52667c;font-size:13px;margin:8px 0;min-height:16px}
+</style></head><body>
+<button id="launch" type="button">📷 Abrir cámara del teléfono</button>
+<input id="input" type="file" accept="image/*" capture="environment" aria-label="Tomar foto de factura"/>
+<p id="status">Se solicitará la cámara del dispositivo cuando sea compatible.</p>
+<script>
+const MAX_BYTES=12*1024*1024;
+function send(type,data={}){window.parent.postMessage(Object.assign({isStreamlitMessage:true,type},data),'*')}
+const button=document.getElementById('launch');const input=document.getElementById('input');const status=document.getElementById('status');
+window.addEventListener('message',(e)=>{if(e.data?.type==='streamlit:render'){send('streamlit:setFrameHeight',{height:145})}});
+send('streamlit:componentReady',{apiVersion:1});send('streamlit:setFrameHeight',{height:145});
+button.addEventListener('click',()=>input.click());
+input.addEventListener('change',()=>{
+ const file=input.files?.[0]; if(!file)return;
+ if(!file.type.startsWith('image/')){status.textContent='Selecciona una fotografía.';return;}
+ if(file.size>MAX_BYTES){status.textContent='La fotografía supera 12 MB. Usa Agregar documento o reduce su tamaño.';return;}
+ status.textContent='Preparando foto…';button.disabled=true;
+ const reader=new FileReader();
+ reader.onload=()=>{const raw=String(reader.result||'');const base64=raw.split(',')[1];
+  if(!base64){status.textContent='No fue posible leer la foto.';button.disabled=false;return;}
+  send('streamlit:setComponentValue',{value:{filename:file.name||'factura.jpg',mime:file.type||'image/jpeg',data:base64},dataType:'json'});
+  status.textContent='Foto recibida. Analizando con Gemini…';button.disabled=false;
+ };
+ reader.onerror=()=>{status.textContent='Error al leer la fotografía.';button.disabled=false;};
+ reader.readAsDataURL(file);
+});
+</script></body></html>
