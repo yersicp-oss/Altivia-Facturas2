@@ -1,33 +1,45 @@
-<!DOCTYPE html>
-<html lang="es"><head><meta charset="utf-8"/><meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1"/>
+<!doctype html><html lang="es"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1" />
 <style>
-*{box-sizing:border-box}body{margin:0;font:15px system-ui,-apple-system,sans-serif;background:transparent;color:#12304e}
-#launch{display:block;width:100%;padding:15px 16px;border:0;border-radius:10px;background:#1767ab;color:#fff;font-weight:700;font-size:16px;cursor:pointer}
-#input{position:absolute;opacity:0;width:1px;height:1px;pointer-events:none}
-#status{text-align:center;color:#52667c;font-size:13px;margin:8px 0;min-height:16px}
+*{box-sizing:border-box}html,body{padding:0;margin:0;font:16px system-ui,-apple-system,"Segoe UI",sans-serif;color:#102c4b;background:transparent}
+.options{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:18px;padding:2px 1px}
+.card{border:2px dashed #bad7f5;border-radius:17px;background:#f3f9ff;color:#102c4b;min-height:162px;padding:25px 12px;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:13px;cursor:pointer;font:inherit;transition:background .12s,border-color .12s;}
+.card:hover,.card:focus-visible{background:#e8f5ff;border-color:#2786d6;outline:0}.card:active{background:#ddecff}
+.name{font-size:clamp(18px,2.1vw,22px);font-weight:760;text-align:center}.hint{font-size:14px;color:#718bab;text-align:center}
+input{position:absolute;width:1px;height:1px;opacity:0;pointer-events:none}
+#status{font-size:13px;color:#52667c;text-align:center;margin:5px 0;min-height:0}#status:empty{display:none}
+@media(max-width:590px){.options{gap:10px}.card{min-height:145px;padding:16px 8px;gap:9px}.hint{font-size:12px}.name{font-size:17px}}
 </style></head><body>
-<button id="launch" type="button">📷 Abrir cámara del teléfono</button>
-<input id="input" type="file" accept="image/*" capture="environment" aria-label="Tomar foto de factura"/>
-<p id="status">Se solicitará la cámara del dispositivo cuando sea compatible.</p>
+<div class="options">
+<button class="card" id="camera" type="button"><span class="name">📷 Tomar foto</span><span class="hint">Abrir la cámara del teléfono</span></button>
+<button class="card" id="document" type="button"><span class="name">📎 Agregar documento</span><span class="hint">Subir foto (JPG, PNG, WEBP) o PDF</span></button>
+</div>
+<input id="cameraFile" type="file" accept="image/*" capture="environment" aria-label="Capturar factura" />
+<input id="documentFile" type="file" accept=".jpg,.jpeg,.png,.webp,.pdf,image/jpeg,image/png,image/webp,application/pdf" aria-label="Agregar documento" />
+<p id="status" aria-live="polite"></p>
 <script>
 const MAX_BYTES=12*1024*1024;
-function send(type,data={}){window.parent.postMessage(Object.assign({isStreamlitMessage:true,type},data),'*')}
-const button=document.getElementById('launch');const input=document.getElementById('input');const status=document.getElementById('status');
-window.addEventListener('message',(e)=>{if(e.data?.type==='streamlit:render'){send('streamlit:setFrameHeight',{height:145})}});
-send('streamlit:componentReady',{apiVersion:1});send('streamlit:setFrameHeight',{height:145});
-button.addEventListener('click',()=>input.click());
-input.addEventListener('change',()=>{
- const file=input.files?.[0]; if(!file)return;
- if(!file.type.startsWith('image/')){status.textContent='Selecciona una fotografía.';return;}
- if(file.size>MAX_BYTES){status.textContent='La fotografía supera 12 MB. Usa Agregar documento o reduce su tamaño.';return;}
- status.textContent='Preparando foto…';button.disabled=true;
+function post(type,data={}){window.parent.postMessage({isStreamlitMessage:true,type,...data},'*')}
+function height(){post('streamlit:setFrameHeight',{height:document.body.scrollHeight+8})}
+window.addEventListener('message',e=>{if(e.data?.type==='streamlit:render') height()});
+post('streamlit:componentReady',{apiVersion:1});height();
+const status=document.getElementById('status');
+const cam=document.getElementById('cameraFile'),doc=document.getElementById('documentFile');
+document.getElementById('camera').onclick=()=>cam.click();
+document.getElementById('document').onclick=()=>doc.click();
+function receive(e){const file=e.target.files?.[0];if(!file)return;
+ const extension=(file.name||'').split('.').pop().toLowerCase();
+ if(!['jpg','jpeg','png','webp','pdf'].includes(extension)){status.textContent='Selecciona JPG, PNG, WEBP o PDF.';height();return}
+ if(file.size>MAX_BYTES){status.textContent='El archivo supera el límite de 12 MB.';height();return}
+ status.textContent='Preparando archivo para Gemini…';height();
  const reader=new FileReader();
- reader.onload=()=>{const raw=String(reader.result||'');const base64=raw.split(',')[1];
-  if(!base64){status.textContent='No fue posible leer la foto.';button.disabled=false;return;}
-  send('streamlit:setComponentValue',{value:{filename:file.name||'factura.jpg',mime:file.type||'image/jpeg',data:base64},dataType:'json'});
-  status.textContent='Foto recibida. Analizando con Gemini…';button.disabled=false;
- };
- reader.onerror=()=>{status.textContent='Error al leer la fotografía.';button.disabled=false;};
+ reader.onload=()=>{const str=String(reader.result||'');const base64=str.split(',')[1];
+ if(!base64){status.textContent='No se pudo leer el archivo.';height();return}
+ post('streamlit:setComponentValue',{value:{filename:file.name||'factura.jpg',mime:file.type||'',data:base64},dataType:'json'});
+ status.textContent='Archivo recibido. Analizando automáticamente…';height();};
+ reader.onerror=()=>{status.textContent='Error al leer archivo.';height()};
  reader.readAsDataURL(file);
-});
+ // Permite volver a seleccionar el mismo documento.
+ e.target.value='';
+}
+cam.addEventListener('change',receive);doc.addEventListener('change',receive);
 </script></body></html>
