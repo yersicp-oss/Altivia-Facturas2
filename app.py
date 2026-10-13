@@ -226,22 +226,26 @@ def main():
         return
     st.divider()
     st.success(f"Archivo seleccionado: {filename}")
+    # Control independiente del formulario: evita desincronización entre iframe y submit.
+    # Solo se presentan valores válidos, sin opción provisional ni valor vacío.
+    tension = st.selectbox(
+        "Tipo de instalación *",
+        options=CATEGORIES,
+        format_func=lambda x: "Baja tensión" if x == "BAJA TENSION" else "Media tensión",
+        key="electric_voltage_category",
+    )
     with st.form("metadata"):
-        tension = st.selectbox("Tipo de instalación *", ["Selecciona una opción", "Baja tensión", "Media tensión"])
         description = st.text_input("Descripción del documento *", max_chars=120,
                                     placeholder="Ejemplo: Poste N° 01", help="Mínimo 1 carácter")
         submit = st.form_submit_button("Guardar en Google Drive", type="primary", use_container_width=True)
     if submit:
-        if tension == "Selecciona una opción":
-            st.warning("Selecciona Baja tensión o Media tensión.")
-            return
         if not description.strip():
             st.warning("Ingresa una descripción de al menos un carácter.")
             return
         if st.session_state.get("saved_signature") == signature:
             st.info("Este archivo ya fue guardado en esta sesión. Toma otra foto para continuar.")
             return
-        category = tension.upper()
+        category = tension
         with st.spinner("Guardando documento en Google Drive..."):
             try:
                 result = save_drive(raw, extension, description, category)
