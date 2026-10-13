@@ -13,7 +13,7 @@ input{position:absolute;width:1px;height:1px;opacity:0;pointer-events:none}
 <button class="card" id="camera" type="button"><span class="name">📷 Tomar foto</span><span class="hint">Abrir la cámara del teléfono</span></button>
 <button class="card" id="document" type="button"><span class="name">📎 Agregar documento</span><span class="hint">Subir foto (JPG, PNG, WEBP) o PDF</span></button>
 </div>
-<input id="cameraFile" type="file" accept="image/*" capture="environment" aria-label="Capturar factura" />
+<input id="cameraFile" type="file" accept="image/*" capture="environment" aria-label="Capturar fotografía" />
 <input id="documentFile" type="file" accept=".jpg,.jpeg,.png,.webp,.pdf,image/jpeg,image/png,image/webp,application/pdf" aria-label="Agregar documento" />
 <p id="status" aria-live="polite"></p>
 <script>
@@ -30,12 +30,12 @@ function receive(e){const file=e.target.files?.[0];if(!file)return;
  const extension=(file.name||'').split('.').pop().toLowerCase();
  if(!['jpg','jpeg','png','webp','pdf'].includes(extension)){status.textContent='Selecciona JPG, PNG, WEBP o PDF.';height();return}
  if(file.size>MAX_BYTES){status.textContent='El archivo supera el límite de 12 MB.';height();return}
- status.textContent='Preparando archivo para Gemini…';height();
+ status.textContent='Preparando documento…';height();
  const reader=new FileReader();
  reader.onload=()=>{const str=String(reader.result||'');const base64=str.split(',')[1];
  if(!base64){status.textContent='No se pudo leer el archivo.';height();return}
- post('streamlit:setComponentValue',{value:{filename:file.name||'factura.jpg',mime:file.type||'',data:base64},dataType:'json'});
- status.textContent='Archivo recibido. Analizando automáticamente…';height();};
+ post('streamlit:setComponentValue',{value:{filename:file.name||'fotografia.jpg',mime:file.type||'',data:base64},dataType:'json'});
+ status.textContent='Archivo listo. Completa los datos debajo.';height();};
  reader.onerror=()=>{status.textContent='Error al leer archivo.';height()};
  reader.readAsDataURL(file);
  // Permite volver a seleccionar el mismo documento.
